@@ -24,11 +24,26 @@ jobs:
           cache-disabled: true
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: |
+          echo "=== Searching for project files ==="
+          SETTINGS_PATH=$(find . -name "settings.gradle*" | head -n 1)
+
+          if [ -z "$SETTINGS_PATH" ]; then
+            echo "ERROR: Could not find settings.gradle.kts anywhere in this repository!"
+            echo "Here is what files you currently have:"
+            find . -maxdepth 3 -not -path '*/.*'
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS_PATH")
+          echo "Found project in: $PROJECT_DIR"
+          cd "$PROJECT_DIR"
+
+          gradle assembleDebug --stacktrace
 
       - name: Upload APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: HealthAssistant-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: "**/build/outputs/apk/debug/*.apk"
