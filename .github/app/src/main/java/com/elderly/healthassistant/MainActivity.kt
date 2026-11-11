@@ -1,0 +1,346 @@
+package com.elderly.healthassistant
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import java.util.Locale
+
+// Flat High-Contrast Colors
+val FlatTeal = Color(0xFF00796B)
+val FlatNavy = Color(0xFF1A237E)
+val FlatRed = Color(0xFFD32F2F)
+val FlatYellow = Color(0xFFFBC02D)
+val FlatBackground = Color(0xFFF4F6F9)
+val FlatSurface = Color(0xFFFFFFFF)
+val FlatTextPrimary = Color(0xFF101828)
+val FlatBorder = Color(0xFFB0BEC5)
+
+data class HealthCondition(
+    val name: String,
+    val keywords: List<String>,
+    val otcRemedy: String,
+    val dosageTiming: String,
+    val advices: String,
+    val isEmergency: Boolean = false
+)
+
+val offlineKnowledgeBase = listOf(
+    HealthCondition(
+        name = "Common Cold & Fever",
+        keywords = listOf("cold", "fever", "chills", "sneezing", "flu"),
+        otcRemedy = "Paracetamol (500mg)",
+        dosageTiming = "1 tablet every 6 to 8 hours after food. Maximum 3000mg/day.",
+        advices = "Drink warm fluids, rest well, and keep warm."
+    ),
+    HealthCondition(
+        name = "Headache / Tension Pain",
+        keywords = listOf("headache", "head pain", "migraine"),
+        otcRemedy = "Paracetamol (500mg)",
+        dosageTiming = "1 tablet with a full glass of water after food.",
+        advices = "Rest in a quiet, dark room. Apply a cool cloth to your forehead."
+    ),
+    HealthCondition(
+        name = "Acid Reflux & Indigestion",
+        keywords = listOf("heartburn", "acid", "gas", "indigestion", "stomach pain"),
+        otcRemedy = "Antacid chewable tablets or oral syrup",
+        dosageTiming = "1 to 2 chewable tablets 30 minutes after meals and before bed.",
+        advices = "Avoid spicy foods. Do not lie flat immediately after eating."
+    ),
+    HealthCondition(
+        name = "Skin Rash or Itching",
+        keywords = listOf("rash", "itch", "allergy", "redness", "skin"),
+        otcRemedy = "Cetirizine (10mg) or Calamine Lotion",
+        dosageTiming = "1 tablet daily at night. Apply lotion gently to the area.",
+        advices = "Keep the skin clean and dry. Avoid scratching."
+    ),
+    HealthCondition(
+        name = "CRITICAL ALERT: Chest Pain / Shortness of Breath",
+        keywords = listOf("chest pain", "breath", "arm pain", "tightness", "can't breathe"),
+        otcRemedy = "DO NOT SELF-MEDICATE",
+        dosageTiming = "IMMEDIATE EMERGENCY",
+        advices = "Sit down in a comfortable position and call emergency services immediately.",
+        isEmergency = true
+    )
+)
+
+class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+    private var tts: TextToSpeech? = null
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var currentCondition by mutableStateOf<HealthCondition?>(null)
+    private var isListening by mutableStateOf(false)
+    private var capturedImage by mutableStateOf<Bitmap?>(null)
+
+    private val cameraLauncher = registerForActivityResult(
+        ActivityResultContracts.TakePicturePreview()
+    ) { bitmap ->
+        if (bitmap != null) {
+            capturedImage = bitmap
+            speak("Photo captured. Keep the affected area clean and dry.")
+        }
+    }
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val micGranted = permissions[Manifest.permission.RECORD_AUDIO] ?: false
+        if (!micGranted) {
+            Toast.makeText(this, "Microphone permission is required for voice.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        tts = TextToSpeech(this, this)
+        initSpeechRecognizer()
+        checkPermissions()
+
+        setContent {
+            HealthScreen(
+                condition = currentCondition,
+                isListening = isListening,
+                capturedImage = capturedImage,
+                onVoiceClick = { startListening() },
+                onCameraClick = { cameraLauncher.launch(null) }
+            )
+        }
+    }
+
+    private fun checkPermissions() {
+        val mic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+        val cam = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+        if (mic != PackageManager.PERMISSION_GRANTED || cam != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA))
+        }
+    }
+
+    private fun initSpeechRecognizer() {
+        if (SpeechRecognizer.isRecognitionAvailable(this)) {
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+                setRecognitionListener(object : RecognitionListener {
+                    override fun onResults(results: Bundle?) {
+                        isListening = false
+                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        if (!matches.isNullOrEmpty()) {
+                            diagnose(matches[0])
+                        }
+                    }
+                    override fun onReadyForSpeech(params: Bundle?) {}
+                    override fun onBeginningOfSpeech() {}
+                    override fun onRmsChanged(rmsdB: Float) {}
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+                    override fun onEndOfSpeech() { isListening = false }
+                    override fun onError(error: Int) {
+                        isListening = false
+                        speak("I could not hear clearly. Please tap the button to try again.")
+                    }
+                    override fun onPartialResults(partialResults: Bundle?) {}
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                })
+            }
+        }
+    }
+
+    private fun startListening() {
+        isListening = true
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Describe how you feel...")
+        }
+        speechRecognizer?.startListening(intent)
+    }
+
+    private fun diagnose(text: String) {
+        val query = text.lowercase()
+        val match = offlineKnowledgeBase.find { cond ->
+            cond.keywords.any { query.contains(it) }
+        }
+
+        if (match != null) {
+            currentCondition = match
+            if (match.isEmergency) {
+                speak("Warning! This may be an emergency. ${match.name}. Please call for medical help immediately.")
+            } else {
+                speak("You may have ${match.name}. Recommended medicine is ${match.otcRemedy}. ${match.dosageTiming}")
+            }
+        } else {
+            speak("I could not identify this symptom offline. Please rest and consult a doctor if you feel unwell.")
+        }
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts?.language = Locale.US
+            tts?.setSpeechRate(0.85f)
+        }
+    }
+
+    private fun speak(message: String) {
+        tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, "TTS_ID")
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        tts?.shutdown()
+        speechRecognizer?.destroy()
+    }
+}
+
+@Composable
+fun HealthScreen(
+    condition: HealthCondition?,
+    isListening: Boolean,
+    capturedImage: Bitmap?,
+    onVoiceClick: () -> Unit,
+    onCameraClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(FlatBackground)
+            .padding(20.dp)
+            .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Care Companion",
+            fontSize = 30.sp,
+            fontWeight = FontWeight.Black,
+            color = FlatNavy,
+            modifier = Modifier.padding(top = 16.dp, bottom = 4.dp)
+        )
+        Text(
+            text = "100% Offline Care Assistant",
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Medium,
+            color = FlatTextPrimary
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Big Voice Button
+        Button(
+            onClick = onVoiceClick,
+            modifier = Modifier.fillMaxWidth().height(84.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = if (isListening) FlatYellow else FlatTeal),
+            border = BorderStroke(3.dp, FlatNavy)
+        ) {
+            Text(
+                text = if (isListening) "LISTENING... SPEAK NOW" else "🎤 TAP & SPEAK SYMPTOMS",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isListening) Color.Black else Color.White
+            )
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Big Camera Button
+        Button(
+            onClick = onCameraClick,
+            modifier = Modifier.fillMaxWidth().height(64.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = FlatNavy),
+            border = BorderStroke(2.dp, FlatNavy)
+        ) {
+            Text(
+                text = "📷 TAKE PHOTO OF SYMPTOM",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = Color.White
+            )
+        }
+
+        if (capturedImage != null) {
+            Spacer(modifier = Modifier.height(16.dp))
+            Image(
+                bitmap = capturedImage.asImageBitmap(),
+                contentDescription = "Captured Symptom",
+                modifier = Modifier.size(160.dp).border(2.dp, FlatNavy, RoundedCornerShape(12.dp))
+            )
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // Results Display
+        if (condition != null) {
+            val borderColor = if (condition.isEmergency) FlatRed else FlatTeal
+            Card(
+                modifier = Modifier.fillMaxWidth().border(3.dp, borderColor, RoundedCornerShape(16.dp)),
+                colors = CardDefaults.cardColors(containerColor = FlatSurface),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    if (condition.isEmergency) {
+                        Text(
+                            text = "⚠️ EMERGENCY ALERT",
+                            color = FlatRed,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.Black
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+
+                    Text("Identified Condition:", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = FlatNavy)
+                    Text(condition.name, fontSize = 22.sp, fontWeight = FontWeight.Black, color = FlatTextPrimary)
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp), color = FlatBorder)
+
+                    Text("Recommended Medicine / First-Aid:", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = FlatNavy)
+                    Text(condition.otcRemedy, fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = FlatTextPrimary)
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text("Dosage & Timing:", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = FlatNavy)
+                    Text(condition.dosageTiming, fontSize = 17.sp, color = FlatTextPrimary, lineHeight = 24.sp)
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Text("Health Advice:", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = FlatNavy)
+                    Text(condition.advices, fontSize = 17.sp, color = FlatTextPrimary, lineHeight = 24.sp)
+                }
+            }
+        } else {
+            Box(
+                modifier = Modifier.fillMaxWidth().border(2.dp, FlatBorder, RoundedCornerShape(16.dp)).background(FlatSurface).padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "Tap the big green button above and say how you feel (e.g. 'I have a headache' or 'I have a fever').",
+                    fontSize = 17.sp,
+                    color = Color.DarkGray,
+                    lineHeight = 24.sp
+                )
+            }
+        }
+    }
+}
